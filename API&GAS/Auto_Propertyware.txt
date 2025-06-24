@@ -1,0 +1,296 @@
+/**The following is written in Google App Script to automatically 
+ * synchronous data from Propertyware to google sheet, 
+ * trigger set to updates every 4 hours. 
+ * This helps track of out of date open projects, 
+ * current quarter'open work orders, 
+ * and leave space for Construction Managers to write notes while updating.
+ */
+
+
+
+function fetchPropertywareData() { 
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('original');
+
+    if (!sheet) {
+      Logger.log('Sheet "original" not found.');
+      return;
+    }
+
+    // Clear the sheet (preserve headers if they exist)
+    if (sheet.getLastRow() > 0) {
+      sheet.clear(); // Remove all content
+    }
+
+    removeEmptyRows(sheet);
+
+    var urls = [
+      'https://app.propertyware.com/pw/00a/4048814080/JSON?0TegYON&shardKey=123456789',
+      'https://app.propertyware.com/pw/00a/4048814081/JSON?1OyFUHF&shardKey=123456789',
+      'https://app.propertyware.com/pw/00a/4048814084/JSON?7KdfKdK&shardKey=123456789'
+    ]; // mock link
+
+    urls.forEach(url => fetchDataAndAppendOrUpdate(url, sheet));
+
+  } catch (error) {
+    Logger.log('Error fetching data: ' + error.message);
+  }
+}
+
+
+function removeEmptyRows(sheet) {
+  var dataRange = sheet.getDataRange();
+  var data = dataRange.getValues();
+  var updatedData = [];
+
+
+  // Collect only rows that have a non-empty WO# (assuming WO# is in column 3)
+  for (var i = 0; i < data.length; i++) {
+    if (i === 0 || data[i][2]) {
+      updatedData.push(data[i]);
+    }
+  }
+
+
+  // Clear the entire sheet and write the updated data without empty rows
+  sheet.clear();
+  sheet.getRange(1, 1, updatedData.length, updatedData[0].length).setValues(updatedData);
+}
+
+
+
+function fetchDataAndAppendOrUpdate(url, sheet) {
+  try {
+    // Fetch the JSON data from the URL
+    var response = UrlFetchApp.fetch(url);
+    var statusCode = response.getResponseCode();
+
+    if (statusCode !== 200) {
+      Logger.log('Error: HTTP status code ' + statusCode);
+      return;
+    }
+
+    var jsonData = JSON.parse(response.getContentText());
+
+    if (!jsonData.records || !Array.isArray(jsonData.records) || jsonData.records.length === 0) {
+      Logger.log('No records available to import.');
+      return;
+    }
+
+    // Get headers from the 'columns' key
+    var headers = jsonData.columns.map(function (column) {
+      return column.label;
+    });
+
+    // If the sheet is empty, add headers first
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(headers);
+    }
+
+    // Create a map of existing data by unique WO# (assuming WO# is in the third column)
+    var existingData = {};
+    if (sheet.getLastRow() > 1) { // Only proceed if there are data rows to check
+      var dataRange = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn());
+      var existingRows = dataRange.getValues();
+
+      existingRows.forEach(function (row, index) {
+        var workOrderNumber = row[2]; // Assuming WO# is in the third column (index 2)
+        if (workOrderNumber) {
+          existingData[workOrderNumber] = index + 2; // Store row number for reference (considering header)
+        }
+      });
+    }
+
+    // Prepare data for bulk update
+    var rowsToUpdate = [];
+    var rowsToAppend = [];
+
+    jsonData.records.forEach(function (record) {
+      var recordWO = record["2"]; // Assuming WO# is in field "2" (third field)
+
+      var row = headers.map(function (header, index) {
+        return record[index.toString()] || '';
+      });
+
+      if (recordWO in existingData) {
+        // Update the existing row only if there are changes
+        var rowIndex = existingData[recordWO];
+        var existingRow = sheet.getRange(rowIndex, 1, 1, row.length).getValues()[0];
+        if (!rowsAreEqual(existingRow, row)) {
+          rowsToUpdate.push({ rowIndex: rowIndex, rowData: row });
+        }
+      } else {
+        // Append a new row
+        rowsToAppend.push(row);
+      }
+    });
+
+    // Batch update rows
+    rowsToUpdate.forEach(function (update) {
+      sheet.getRange(update.rowIndex, 1, 1, update.rowData.length).setValues([update.rowData]);
+    });
+
+    // Batch append rows
+    if (rowsToAppend.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+    }
+
+  } catch (error) {
+    Logger.log('Error fetching data for URL: ' + url + ' - ' + error.message);
+  }
+}
+
+function rowsAreEqual(row1, row2) {
+  // Helper function to check if two rows are equal
+  if (row1.length !== row2.length) {
+    return false;
+  }
+  for (var i = 0; i < row1.length; i++) {
+    if (row1[i] !== row2[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+
+
+// ************************ Current Quarter *******************
+function archiveQuarterTab() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceSheet = ss.getSheetByName("Current_Quarter");
+
+  if (!sourceSheet) {
+    Logger.log("No 'Current_Quarter' sheet found.");
+    return;
+  }
+
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = today.getMonth(); // 0-based (0 = Jan)
+
+  const isLastDayOfQuarter =
+    (month === 2 && today.getDate() === 31) ||  // March 31
+    (month === 5 && today.getDate() === 30) ||  // June 30
+    (month === 8 && today.getDate() === 30) ||  // Sept 30
+    (month === 11 && today.getDate() === 31);   // Dec 31
+
+  if (!isLastDayOfQuarter) {
+    Logger.log("Not the last day of a quarter. Skipping archive.");
+    return;
+  }
+
+  const quarter = Math.floor(month / 3) + 1;
+  const archiveName = `Archive_Q${quarter}_${year}`;
+
+  // If already exists, delete to replace
+  const existing = ss.getSheetByName(archiveName);
+  if (existing) ss.deleteSheet(existing);
+
+  const archived = sourceSheet.copyTo(ss).setName(archiveName);
+  ss.setActiveSheet(archived);
+  archived.showSheet();
+  Logger.log(`Archived to: ${archiveName}`);
+}
+
+// ************ update **************
+function syncQuarterTab() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const refSheet = ss.getSheetByName("Current Quarter Ref");
+  const targetSheet = ss.getSheetByName("Current_Quarter");
+
+  if (!refSheet || !targetSheet) {
+    Logger.log("Missing reference or target sheet.");
+    return;
+  }
+  
+  archiveQuarterTab();
+
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = today.getMonth(); // 0-based
+
+  const refData = refSheet.getDataRange().getValues();
+  const targetData = targetSheet.getDataRange().getValues();
+
+  if (refData.length < 2) {
+    Logger.log("Reference data is empty.");
+    return;
+  }
+
+  // Extract headers and data
+  const refHeaders = refData[0];
+  const refRows = refData.slice(1);
+
+  const targetHeaders = targetData[0];
+  const targetRows = targetData.slice(1);
+
+  // Build map of existing target rows using "WO# + City"
+  const targetMap = {};
+  targetRows.forEach((row, i) => {
+    const key = `${row[0]}|${row[4]}`; // WO# + City by Name
+    targetMap[key] = {
+      rowIndex: i + 2, // Account for header row and 1-based index
+      rowData: row
+    };
+  });
+
+  // Track which keys we already saw (for potential future cleanup)
+  const seenKeys = new Set();
+
+  // Prepare to append new rows
+  const rowsToAppend = [];
+
+  const startOfQuarter = new Date(year, Math.floor(month / 3) * 3, 1);
+  const endOfQuarter = new Date(year, Math.floor(month / 3) * 3 + 3, 0); // last day of quarter
+
+  const filteredRefRows = refRows.filter(row => {
+    const dateCreated = new Date(row[1]); // Assuming Date Created is column B (index 1)
+    return dateCreated >= startOfQuarter && dateCreated <= endOfQuarter;
+  });
+
+
+  filteredRefRows.forEach(refRow => {
+    const wo = refRow[0];
+    const city = refRow[4];
+    const key = `${wo}|${city}`;
+    seenKeys.add(key);
+
+    if (targetMap[key]) {
+      // Update existing row data (columns 1–7 only, preserve notes in 8 & 9)
+      const existing = targetMap[key];
+      const newData = refRow.concat(existing.rowData.slice(7, 9)); // Preserve notes
+      targetSheet.getRange(existing.rowIndex, 1, 1, newData.length).setValues([newData]);
+    } else {
+      // New entry — add empty note columns
+      const newRow = refRow.concat(["", ""]);
+      rowsToAppend.push(newRow);
+    }
+  });
+
+  // Append new rows at the end
+  if (rowsToAppend.length > 0) {
+    const startRow = targetSheet.getLastRow() + 1;
+    targetSheet.getRange(startRow, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+  }
+
+  Logger.log("Sync complete. Added: " + rowsToAppend.length + " rows.");
+
+  // Remove rows that are no longer in the filtered reference set
+  const rowsToDelete = [];
+
+  Object.keys(targetMap).forEach(key => {
+    if (!seenKeys.has(key)) {
+      rowsToDelete.push(targetMap[key].rowIndex);
+    }
+  });
+
+  // Sort descending so deleting doesn't shift the rows below
+  rowsToDelete.sort((a, b) => b - a);
+
+  rowsToDelete.forEach(rowIndex => {
+    targetSheet.deleteRow(rowIndex);
+  });
+
+Logger.log("Deleted old rows: " + rowsToDelete.length);
+}
