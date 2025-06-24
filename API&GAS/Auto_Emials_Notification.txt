@@ -1,0 +1,96 @@
+/**
+ * This is written is Google App Script.
+ * Send email notification about overdue work-orders to corresponding vendors listed,
+ * using the vendor’s own e-mail in column H (“cleaned email”).
+ * Set to send every morning between 8am - 9am until the work order being closed.
+ * if the vendor do not have any overdue work orders, they will not receive emails.
+ */
+function emailOverdues() {
+  /* ---------- EDIT THESE FEW CONSTANTS ---------- */
+  const SHEET_URL = 'https://docs.google.com/spreadsheets/d/ABCDE=55307590&fvid=12345678910' // mocked link 
+  const TAB_NAME  = '7+ Day WOs';
+
+  // column indexes (0-based)  A=0, B=1,…, H=7
+  const VENDOR_COL = 1;
+  const EMAIL_COL  = 7;
+  /* --------------------------------------------- */
+  // 1️. Grab the data from the sheet
+  const ss    = SpreadsheetApp.openByUrl(SHEET_URL);
+  const sheet = ss.getSheetByName(TAB_NAME);
+  if (!sheet) throw new Error(`Tab "${TAB_NAME}" not found`);
+
+  const allRows = sheet.getDataRange().getValues();   // 2-D array
+  if (allRows.length < 2) return;                     // header only → nothing to send
+
+  const header   = allRows[0];
+  const dataRows = allRows.slice(1);                  // skip header
+
+  // 2️. Group rows by vendor name
+  const byVendor = {};
+  dataRows.forEach(r => {
+    const vendor = String(r[VENDOR_COL]).trim();
+    const email  = String(r[EMAIL_COL]).trim();
+    if (!vendor || !email) return;   // skip blanks
+    if (!byVendor[vendor]) byVendor[vendor] = { email, rows: [] };
+    byVendor[vendor].rows.push(r);
+  });
+  if (Object.keys(byVendor).length === 0) return;      // nothing to mail
+
+  
+  // 3️. Prepare constants used for every e-mail
+  const pick  = [0, 2, 3, 4, 5];       // A,C,D,E,F → columns to show
+  const today = Utilities.formatDate(
+                  new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  // 4️. Generate and send one e-mail per vendor
+  Object.keys(byVendor).forEach(vendorName => {
+    const { email, rows } = byVendor[vendorName];
+    if (rows.length === 0) return;     // safety
+
+    const friendly = vendorName.split('-').pop().trim();   // “e.g.Oscar Flores”
+
+    /* 4a. Build HTML table */
+    let html = `
+      <p>Hi ${friendly},</p>
+      <p>The following move-in work orders have been
+         <b>open for more than 7&nbsp;days</b>. Please review and take
+         action at your earliest convenience.</p>
+      <table border="1" cellpadding="6" cellspacing="0"
+             style="border-collapse:collapse;font-family:Arial;font-size:12px;">`;
+
+    // header row
+    html += '<tr>';
+    pick.forEach(c => html += `<th>${header[c]}</th>`); 
+    html += '</tr>';
+
+    // data rows
+    rows.forEach(r => {
+      html += '<tr>';
+      pick.forEach(c => html += `<td>${r[c]}</td>`);
+      html += '</tr>';
+    });
+    html += `</table>
+             <p style="font-size:11px;color:#666;margin-top:18px;">
+               — This is an <i>automated</i> notification from Google Apps Script;
+               please do not reply.
+             </p>`;
+
+    /* 4b. Build CSV attachment (same columns shown in the e-mail) */
+    const csvLines = [
+      pick.map(c => `"${header[c]}"`).join(',')           // add header
+    ].concat(
+      rows.map(r => pick.map(c =>
+        `"${String(r[c]).replace(/"/g, '""')}"`).join(',')) );
+    const csvBlob = Utilities.newBlob(
+                      csvLines.join('\r\n'), 'text/csv',
+                      `${friendly}-overdue-workorders.csv`);
+
+    /* 4c. Send e-mail */
+    MailApp.sendEmail({
+      to:       email,
+      subject:  `📌 Action Required: ${rows.length} Overdue Move-in Work Orders – ${today}`,
+      htmlBody: html,
+      attachments: [csvBlob]
+    });
+  });
+}
