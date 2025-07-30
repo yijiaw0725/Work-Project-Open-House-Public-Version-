@@ -1,0 +1,10 @@
+streamlit
+pandas
+selenium
+webdriver-manager
+matplotlib
+seaborn
+textblob
+scikit-learn
+chromedriver-autoinstaller
+pyvirtualdisplay
